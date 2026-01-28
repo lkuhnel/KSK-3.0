@@ -341,6 +341,17 @@ with tabs[3]:
             if priority is None:
                 priority = "Rotation/Lecture"
             priority = str(priority).strip()
+            # Normalize priority values (case-insensitive)
+            priority_lower = priority.lower()
+            if priority_lower in ['non-call request', 'non call request', 'noncall']:
+                priority = "Non-call request"
+            elif priority_lower in ['va']:
+                priority = "VA"
+            elif priority_lower in ['rotation/lecture', 'rotation lecture', 'rotation', 'lecture']:
+                priority = "Rotation/Lecture"
+            else:
+                # Default to Rotation/Lecture if unknown
+                priority = "Rotation/Lecture"
             if resident not in existing_constraints:
                 existing_constraints[resident] = []
             existing_constraints[resident].append((start, end, priority))
@@ -375,9 +386,15 @@ with tabs[3]:
             with cols[1]:
                 new_end = st.date_input("End Date", value=end, key=f"soft_{norm_resident}_end_{idx}_{st.session_state.get('constraint_session_id', 'default')}")
             with cols[2]:
+                priority_options = ["Non-call request", "VA", "Rotation/Lecture"]
+                # Handle case where priority might not be in the list (backward compatibility)
+                try:
+                    priority_index = priority_options.index(priority) if priority in priority_options else 2
+                except:
+                    priority_index = 2  # Default to Rotation/Lecture
                 new_priority = st.selectbox(
-                    "Priority", ["Non-call request", "Rotation/Lecture"],
-                    index=["Non-call request", "Rotation/Lecture"].index(priority),
+                    "Priority", priority_options,
+                    index=priority_index,
                     key=f"soft_{norm_resident}_priority_{idx}_{st.session_state.get('constraint_session_id', 'default')}"
                 )
             with cols[3]:
@@ -401,8 +418,8 @@ with tabs[3]:
                     value=None)
             with add_cols[2]:
                 new_priority = st.selectbox(
-                    "Priority", ["Non-call request", "Rotation/Lecture"],
-                    index=1,
+                    "Priority", ["Non-call request", "VA", "Rotation/Lecture"],
+                    index=2,  # Default to Rotation/Lecture
                     key=f"soft_new_priority_{norm_resident}_{st.session_state.get('constraint_session_id', 'default')}"
                 )
             with add_cols[3]:
@@ -430,8 +447,8 @@ with tabs[3]:
             with bulk_cols[3]:
                 bulk_priority = st.selectbox(
                     "Priority",
-                    ["Non-call request", "Rotation/Lecture"],
-                    index=1,
+                    ["Non-call request", "VA", "Rotation/Lecture"],
+                    index=2,  # Default to Rotation/Lecture
                     key=f"soft_bulk_priority_{norm_resident}_{st.session_state.get('constraint_session_id', 'default')}"
                 )
             with bulk_cols[4]:
@@ -1104,6 +1121,7 @@ with tabs[7]:
             'Date': [],
             'Hard_Constraints': [],
             'Soft_NonCall': [],
+            'Soft_VA': [],
             'Soft_Rotation': []
         }
         
@@ -1113,6 +1131,7 @@ with tabs[7]:
             
             hard_count = 0
             soft_noncall_count = 0
+            soft_va_count = 0
             soft_rotation_count = 0
             
             # Count hard constraints for this date
@@ -1155,18 +1174,21 @@ with tabs[7]:
                     if start_date <= date.date() <= end_date:
                         if priority == "Non-call request":
                             soft_noncall_count += 1
+                        elif priority == "VA":
+                            soft_va_count += 1
                         else:
                             soft_rotation_count += 1
             
             daily_counts['Hard_Constraints'].append(hard_count)
             daily_counts['Soft_NonCall'].append(soft_noncall_count)
+            daily_counts['Soft_VA'].append(soft_va_count)
             daily_counts['Soft_Rotation'].append(soft_rotation_count)
         
         # Create DataFrame for plotting
         chart_df = pd.DataFrame(daily_counts)
         
         # Display summary statistics
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             total_hard = sum(daily_counts['Hard_Constraints'])
             st.metric("Total Hard Constraints", total_hard)
@@ -1174,24 +1196,27 @@ with tabs[7]:
             total_soft_noncall = sum(daily_counts['Soft_NonCall'])
             st.metric("Total Non-call Requests", total_soft_noncall)
         with col3:
+            total_soft_va = sum(daily_counts['Soft_VA'])
+            st.metric("Total VA Constraints", total_soft_va)
+        with col4:
             total_soft_rotation = sum(daily_counts['Soft_Rotation'])
             st.metric("Total Rotation/Lecture", total_soft_rotation)
-        with col4:
-            max_daily = max([h + sn + sr for h, sn, sr in zip(daily_counts['Hard_Constraints'], daily_counts['Soft_NonCall'], daily_counts['Soft_Rotation'])])
+        with col5:
+            max_daily = max([h + sn + sv + sr for h, sn, sv, sr in zip(daily_counts['Hard_Constraints'], daily_counts['Soft_NonCall'], daily_counts['Soft_VA'], daily_counts['Soft_Rotation'])])
             st.metric("Peak Daily Constraints", max_daily)
         
         # Create stacked bar chart using Streamlit's built-in charting
         st.subheader("Daily Constraint Distribution Across Block")
         
         # Prepare data for Streamlit's bar chart (needs to be in the right format)
-        chart_display_df = chart_df.set_index('Date')[['Hard_Constraints', 'Soft_NonCall', 'Soft_Rotation']]
-        chart_display_df.columns = ['Hard Constraints', 'Non-call Requests', 'Rotation/Lecture']
+        chart_display_df = chart_df.set_index('Date')[['Hard_Constraints', 'Soft_NonCall', 'Soft_VA', 'Soft_Rotation']]
+        chart_display_df.columns = ['Hard Constraints', 'Non-call Requests', 'VA', 'Rotation/Lecture']
         
         # Display the stacked bar chart
         st.bar_chart(chart_display_df, height=500)
         
         # Show top constraint days
-        chart_df['Total_Constraints'] = chart_df['Hard_Constraints'] + chart_df['Soft_NonCall'] + chart_df['Soft_Rotation']
+        chart_df['Total_Constraints'] = chart_df['Hard_Constraints'] + chart_df['Soft_NonCall'] + chart_df['Soft_VA'] + chart_df['Soft_Rotation']
         top_days = chart_df[chart_df['Total_Constraints'] > 0].nlargest(10, 'Total_Constraints')
         
         if not top_days.empty:
@@ -1199,8 +1224,8 @@ with tabs[7]:
             st.info("These are the days with the highest number of constraints - consider avoiding major schedule assignments on these dates.")
             
             # Format the display
-            display_df = top_days[['Date', 'Hard_Constraints', 'Soft_NonCall', 'Soft_Rotation', 'Total_Constraints']].copy()
-            display_df.columns = ['Date', 'Hard', 'Non-call', 'Rotation', 'Total']
+            display_df = top_days[['Date', 'Hard_Constraints', 'Soft_NonCall', 'Soft_VA', 'Soft_Rotation', 'Total_Constraints']].copy()
+            display_df.columns = ['Date', 'Hard', 'Non-call', 'VA', 'Rotation', 'Total']
             st.dataframe(display_df, use_container_width=True)
         else:
             st.info("No constraint conflicts found - all days are clear for scheduling.")
@@ -1216,12 +1241,19 @@ with tabs[8]:
             'call_fairness_weight': 1.0,
             'backup_fairness_weight': 0.01,
             'non_call_request_weight': 10.0,
+            'va_weight': 5.0,
             'rotation_lecture_weight': 0.1,
             'golden_weekend_weight': 0.01,
             'rotation_fairness_weight': 0.5,
             'same_weekday_spacing_weight': 0.2,
             'pgy4_thursday_bonus': 0.1,
-            'pgy2_wednesday_bonus': 0.05
+            'pgy2_wednesday_bonus': 0.05,
+            'intern_total_fairness_weight': 5.0,
+            'intern_weekday_fairness_weight': 3.0,
+            'intern_saturday_fairness_weight': 3.0,
+            'intern_soft_constraint_weight': 20.0,
+            'intern_consecutive_penalty_weight': 2.0,
+            'intern_senior_variety_weight': 2.0
         }
     
     st.subheader("Fairness Weights")
@@ -1246,24 +1278,33 @@ with tabs[8]:
         )
     
     st.subheader("Soft Constraint Weights")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.session_state.dev_settings['non_call_request_weight'] = st.number_input(
             "Non-call Request Weight",
             min_value=0.0,
             max_value=50.0,
-            value=st.session_state.dev_settings['non_call_request_weight'],
+            value=st.session_state.dev_settings.get('non_call_request_weight', 10.0),
             step=0.5,
-            help="Weight for non-call request violations (higher = more important)"
+            help="Weight for non-call request violations (highest priority, higher = more important)"
         )
     with col2:
+        st.session_state.dev_settings['va_weight'] = st.number_input(
+            "VA Weight",
+            min_value=0.0,
+            max_value=30.0,
+            value=st.session_state.dev_settings.get('va_weight', 5.0),
+            step=0.5,
+            help="Weight for VA constraint violations (medium priority, higher = more important)"
+        )
+    with col3:
         st.session_state.dev_settings['rotation_lecture_weight'] = st.number_input(
             "Rotation/Lecture Weight",
             min_value=0.0,
             max_value=5.0,
-            value=st.session_state.dev_settings['rotation_lecture_weight'],
+            value=st.session_state.dev_settings.get('rotation_lecture_weight', 0.1),
             step=0.05,
-            help="Weight for rotation/lecture violations (higher = more important)"
+            help="Weight for rotation/lecture violations (lowest priority, higher = more important)"
         )
     
     st.subheader("Other Penalties")
@@ -1321,12 +1362,68 @@ with tabs[8]:
             help="Bonus for assigning PGY2s on Wednesdays (higher = stronger preference)"
         )
     
+    st.subheader("Intern Assignment Weights")
+    st.info("Control how intern assignments are optimized. Higher weights = more important.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.session_state.dev_settings['intern_total_fairness_weight'] = st.number_input(
+            "Intern Total Fairness Weight",
+            min_value=0.0,
+            max_value=20.0,
+            value=st.session_state.dev_settings.get('intern_total_fairness_weight', 5.0),
+            step=0.5,
+            help="Weight for total assignment fairness across interns (higher = more important)"
+        )
+        st.session_state.dev_settings['intern_weekday_fairness_weight'] = st.number_input(
+            "Intern Weekday Fairness Weight",
+            min_value=0.0,
+            max_value=15.0,
+            value=st.session_state.dev_settings.get('intern_weekday_fairness_weight', 3.0),
+            step=0.5,
+            help="Weight for weekday assignment fairness across interns (higher = more important)"
+        )
+        st.session_state.dev_settings['intern_saturday_fairness_weight'] = st.number_input(
+            "Intern Saturday Fairness Weight",
+            min_value=0.0,
+            max_value=15.0,
+            value=st.session_state.dev_settings.get('intern_saturday_fairness_weight', 3.0),
+            step=0.5,
+            help="Weight for Saturday assignment fairness across interns (higher = more important)"
+        )
+    with col2:
+        st.session_state.dev_settings['intern_soft_constraint_weight'] = st.number_input(
+            "Intern Soft Constraint Weight",
+            min_value=0.0,
+            max_value=50.0,
+            value=st.session_state.dev_settings.get('intern_soft_constraint_weight', 20.0),
+            step=1.0,
+            help="Weight for non-call request violations for interns (higher = more important)"
+        )
+        st.session_state.dev_settings['intern_consecutive_penalty_weight'] = st.number_input(
+            "Intern Consecutive Penalty Weight",
+            min_value=0.0,
+            max_value=10.0,
+            value=st.session_state.dev_settings.get('intern_consecutive_penalty_weight', 2.0),
+            step=0.1,
+            help="Weight for discouraging consecutive intern slot assignments (higher = more important)"
+        )
+        st.session_state.dev_settings['intern_senior_variety_weight'] = st.number_input(
+            "Intern Senior Variety Weight",
+            min_value=0.0,
+            max_value=10.0,
+            value=st.session_state.dev_settings.get('intern_senior_variety_weight', 2.0),
+            step=0.1,
+            help="Weight for encouraging interns to work with different PGY3/4s (higher = more variety)"
+        )
+    
     # Display current priority table
     st.subheader("Current Priority Table")
     priority_data = {
         'Violation Type': [
             'Non-call request',
             'Call Fairness',
+            'VA',
             'Rotation Fairness',
             'Same-Weekday Spacing',
             'Backup Fairness',
@@ -1334,12 +1431,13 @@ with tabs[8]:
             'Golden Weekend'
         ],
         'Weight': [
-            st.session_state.dev_settings['non_call_request_weight'],
+            st.session_state.dev_settings.get('non_call_request_weight', 10.0),
             st.session_state.dev_settings['call_fairness_weight'],
+            st.session_state.dev_settings.get('va_weight', 5.0),
             st.session_state.dev_settings.get('rotation_fairness_weight', 0.5),
             st.session_state.dev_settings.get('same_weekday_spacing_weight', 0.2),
             st.session_state.dev_settings['backup_fairness_weight'],
-            st.session_state.dev_settings['rotation_lecture_weight'],
+            st.session_state.dev_settings.get('rotation_lecture_weight', 0.1),
             st.session_state.dev_settings['golden_weekend_weight']
         ]
     }
@@ -1354,12 +1452,19 @@ with tabs[8]:
             'call_fairness_weight': 1.0,
             'backup_fairness_weight': 0.01,
             'non_call_request_weight': 10.0,
+            'va_weight': 5.0,
             'rotation_lecture_weight': 0.1,
             'golden_weekend_weight': 0.01,
             'rotation_fairness_weight': 0.5,
             'same_weekday_spacing_weight': 0.2,
             'pgy4_thursday_bonus': 0.1,
-            'pgy2_wednesday_bonus': 0.05
+            'pgy2_wednesday_bonus': 0.05,
+            'intern_total_fairness_weight': 5.0,
+            'intern_weekday_fairness_weight': 3.0,
+            'intern_saturday_fairness_weight': 3.0,
+            'intern_soft_constraint_weight': 20.0,
+            'intern_consecutive_penalty_weight': 2.0,
+            'intern_senior_variety_weight': 2.0
         }
         st.rerun()
 
@@ -1420,12 +1525,13 @@ with tabs[9]:
             st.session_state.get('block_transition', {}),
             st.session_state.get('rotation_periods', [])
         )
-        # Assign interns using OR-Tools optimization with fixed weights
+        # Assign interns using OR-Tools optimization with weights from dev_settings
         schedule_df, intern_fairness_df, intern_objective_value = engine.optimize_intern_assignments(
             schedule_df, residents, pgy_levels, hard_constraints, 
             st.session_state.get('soft_constraints', {}),
-            {'intern_fairness_weight': 1.0, 'intern_soft_constraint_weight': 5.0},  # Fixed weights
-            intern_call_cap
+            dev_settings,  # Pass dev_settings with all intern weights
+            intern_call_cap,
+            st.session_state.get('rotation_periods', [])
         )
         # Assign supervisors
         schedule_df = engine.assign_supervisors(schedule_df, residents, pgy_levels, hard_constraints, st.session_state.get('soft_constraints', {}), holidays)
@@ -1449,6 +1555,8 @@ with tabs[9]:
             "Running Total",
             "Soft Constraint Results",
             "Golden Weekends",
+            "Intern-Senior Pairing",
+            "Call by Rotation",
             "Download"
         ]
         subtabs = st.tabs(subtab_names)
@@ -1628,14 +1736,17 @@ with tabs[9]:
             else:
                 # Prepare for analysis
                 total = 0
-                total_high = 0
-                total_low = 0
+                total_noncall = 0
+                total_va = 0
+                total_rotation = 0
                 fulfilled = 0
-                fulfilled_high = 0
-                fulfilled_low = 0
+                fulfilled_noncall = 0
+                fulfilled_va = 0
+                fulfilled_rotation = 0
                 unfulfilled = 0
-                unfulfilled_high = 0
-                unfulfilled_low = 0
+                unfulfilled_noncall = 0
+                unfulfilled_va = 0
+                unfulfilled_rotation = 0
                 unfulfilled_rows = []
                 # Build a lookup for assignments (strip whitespace from resident names)
                 call_lookup = {(row['Date'], str(row['Call']).strip()): True for _, row in schedule_df.iterrows()}
@@ -1655,9 +1766,11 @@ with tabs[9]:
                         # Count type
                         total += 1
                         if priority == "Non-call request":
-                            total_high += 1
+                            total_noncall += 1
+                        elif priority == "VA":
+                            total_va += 1
                         else:
-                            total_low += 1
+                            total_rotation += 1
                         # Check for violations
                         violated_dates = []
                         d = start
@@ -1667,22 +1780,31 @@ with tabs[9]:
                             if priority == "Non-call request":
                                 if call_violation or backup_violation:
                                     violated_dates.append((d, call_violation, backup_violation))
+                            elif priority == "VA":
+                                # VA: violation if assigned as call or backup (same as non-call request)
+                                if call_violation or backup_violation:
+                                    violated_dates.append((d, call_violation, backup_violation))
                             else:
+                                # Rotation/Lecture: violation if assigned as call only
                                 if call_violation:
                                     violated_dates.append((d, True, False))
                             d += pd.Timedelta(days=1)
                         if not violated_dates:
                             fulfilled += 1
                             if priority == "Non-call request":
-                                fulfilled_high += 1
+                                fulfilled_noncall += 1
+                            elif priority == "VA":
+                                fulfilled_va += 1
                             else:
-                                fulfilled_low += 1
+                                fulfilled_rotation += 1
                         else:
                             unfulfilled += 1
                             if priority == "Non-call request":
-                                unfulfilled_high += 1
+                                unfulfilled_noncall += 1
+                            elif priority == "VA":
+                                unfulfilled_va += 1
                             else:
-                                unfulfilled_low += 1
+                                unfulfilled_rotation += 1
                             unfulfilled_rows.append({
                                 'Resident': resident,
                                 'Start_Date': start,
@@ -1694,14 +1816,17 @@ with tabs[9]:
                             })
                 st.subheader("Soft Constraint Summary")
                 st.markdown(f"**Total soft constraints:** {total}")
-                st.markdown(f"- Non-call request: {total_high}")
-                st.markdown(f"- Rotation/Lecture: {total_low}")
+                st.markdown(f"- Non-call request: {total_noncall}")
+                st.markdown(f"- VA: {total_va}")
+                st.markdown(f"- Rotation/Lecture: {total_rotation}")
                 st.markdown(f"**Fulfilled:** {fulfilled}  ")
-                st.markdown(f"- Non-call request: {fulfilled_high}")
-                st.markdown(f"- Rotation/Lecture: {fulfilled_low}")
+                st.markdown(f"- Non-call request: {fulfilled_noncall}")
+                st.markdown(f"- VA: {fulfilled_va}")
+                st.markdown(f"- Rotation/Lecture: {fulfilled_rotation}")
                 st.markdown(f"**Unfulfilled:** {unfulfilled}")
-                st.markdown(f"- Non-call request: {unfulfilled_high}")
-                st.markdown(f"- Rotation/Lecture: {unfulfilled_low}")
+                st.markdown(f"- Non-call request: {unfulfilled_noncall}")
+                st.markdown(f"- VA: {unfulfilled_va}")
+                st.markdown(f"- Rotation/Lecture: {unfulfilled_rotation}")
                 if unfulfilled_rows:
                     st.subheader("Unfulfilled Soft Constraints")
                     st.dataframe(pd.DataFrame(unfulfilled_rows))
@@ -1733,6 +1858,210 @@ with tabs[9]:
                     ])
                     st.dataframe(df_gw)
         with subtabs[4]:
+            st.header("Intern-Senior Pairing Analysis")
+            st.info("Analyze how interns are paired with different PGY3/4 seniors. This helps visualize the variety factor effectiveness.")
+            
+            schedule_df = st.session_state.schedule_df.copy()
+            if schedule_df.empty or 'Intern' not in schedule_df.columns:
+                st.info("No intern assignment data available.")
+            else:
+                # Get PGY levels
+                pgy_map = dict(zip(st.session_state.residents_df['Name'], st.session_state.residents_df['PGY']))
+                
+                # Filter to intern days (days where PGY3/4 is on call and intern is assigned)
+                intern_days_df = schedule_df[
+                    (schedule_df['Call'].map(pgy_map).isin([3, 4])) & 
+                    (schedule_df['Intern'].notna()) & 
+                    (schedule_df['Intern'] != '')
+                ].copy()
+                
+                if intern_days_df.empty:
+                    st.info("No intern assignments found (no PGY3/4 call assignments with interns).")
+                else:
+                    # Build pairing matrix
+                    intern_names = st.session_state.residents_df[st.session_state.residents_df['PGY'] == 1]['Name'].tolist()
+                    senior_names = sorted([name for name in pgy_map.keys() if pgy_map[name] in [3, 4]])
+                    
+                    if not intern_names:
+                        st.info("No interns found in resident list.")
+                    elif not senior_names:
+                        st.info("No PGY3/4 seniors found.")
+                    else:
+                        # Create pairing count matrix
+                        pairing_matrix = []
+                        for intern in intern_names:
+                            row = {'Intern': intern}
+                            for senior in senior_names:
+                                # Count how many times this intern worked with this senior
+                                count = len(intern_days_df[
+                                    (intern_days_df['Intern'] == intern) & 
+                                    (intern_days_df['Call'] == senior)
+                                ])
+                                row[senior] = count
+                            pairing_matrix.append(row)
+                        
+                        pairing_df = pd.DataFrame(pairing_matrix)
+                        pairing_df = pairing_df.set_index('Intern')
+                        
+                        # Display summary statistics
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            total_pairings = pairing_df.sum().sum()
+                            st.metric("Total Intern-Senior Pairings", total_pairings)
+                        with col2:
+                            max_pairing = pairing_df.max().max()
+                            st.metric("Max Pairing Count", max_pairing)
+                        with col3:
+                            if len(intern_names) > 0 and len(senior_names) > 0:
+                                avg_pairing = total_pairings / (len(intern_names) * len(senior_names))
+                                st.metric("Average Pairing Count", f"{avg_pairing:.2f}")
+                        
+                        # Calculate variety metrics
+                        st.subheader("Variety Metrics")
+                        variety_metrics = []
+                        for intern in intern_names:
+                            intern_row = pairing_df.loc[intern]
+                            non_zero_pairs = (intern_row > 0).sum()
+                            total_assignments = intern_row.sum()
+                            max_with_senior = intern_row.max()
+                            if total_assignments > 0:
+                                variety_score = non_zero_pairs / len(senior_names) * 100  # Percentage of seniors worked with
+                            else:
+                                variety_score = 0
+                            
+                            variety_metrics.append({
+                                'Intern': intern,
+                                'Total Assignments': int(total_assignments),
+                                'Unique Seniors Worked With': int(non_zero_pairs),
+                                'Max Pairing Count': int(max_with_senior),
+                                'Variety Score (%)': f"{variety_score:.1f}"
+                            })
+                        
+                        variety_df = pd.DataFrame(variety_metrics)
+                        st.dataframe(variety_df, use_container_width=True)
+        
+        with subtabs[5]:
+            st.header("Call by Rotation (PGY2/PGY3)")
+            st.info("Visualization of call shift distribution across rotation periods for PGY2 and PGY3 residents.")
+            
+            schedule_df = st.session_state.schedule_df.copy()
+            rotation_periods = st.session_state.get('rotation_periods', [])
+            
+            if schedule_df.empty:
+                st.info("No schedule data available.")
+            elif not rotation_periods:
+                st.info("No rotation periods defined. Add rotation periods in the 'Rotation Periods' tab to see this analysis.")
+            else:
+                # Calculate call by rotation data (same logic as in Download tab)
+                df = schedule_df.copy()
+                df['Date'] = pd.to_datetime(df['Date'])
+                pgy_map = dict(zip(st.session_state.residents_df['Name'], st.session_state.residents_df['PGY']))
+                
+                # Sort rotation periods by switch date
+                sorted_rotations = sorted(rotation_periods, key=lambda x: x['switch_date'])
+                
+                # Create rotation ranges
+                rotation_ranges = []
+                schedule_start = pd.to_datetime(df['Date']).min().date()
+                schedule_end = pd.to_datetime(df['Date']).max().date()
+                
+                # Create rotation ranges
+                # Rotation 0: from block start to first switch date
+                if len(sorted_rotations) > 0:
+                    first_switch = sorted_rotations[0]['switch_date']
+                    if schedule_start < first_switch:
+                        rotation_ranges.append({
+                            'name': 'Rotation 0',
+                            'start_date': schedule_start,
+                            'end_date': first_switch - pd.Timedelta(days=1)
+                        })
+                
+                # Rotations 1, 2, 3...: between switch dates
+                for i in range(len(sorted_rotations) - 1):
+                    rotation = sorted_rotations[i]
+                    rotation_start = rotation['switch_date']
+                    rotation_end = sorted_rotations[i + 1]['switch_date'] - pd.Timedelta(days=1)
+                    
+                    # Use rotation name if provided, otherwise use index (i+1 since Rotation 0 is separate)
+                    rotation_name = rotation.get('rotation_name')
+                    if rotation_name:
+                        rotation_name = rotation_name
+                    else:
+                        rotation_name = f'Rotation {i + 1}'
+                    
+                    rotation_ranges.append({
+                        'name': rotation_name,
+                        'start_date': rotation_start,
+                        'end_date': rotation_end
+                    })
+                
+                # Last rotation: from last switch date to block end
+                if len(sorted_rotations) > 0:
+                    last_switch = sorted_rotations[-1]['switch_date']
+                    if last_switch <= schedule_end:
+                        # Get the rotation name for the last rotation
+                        last_rotation_name = sorted_rotations[-1].get('rotation_name')
+                        if not last_rotation_name:
+                            # If no name provided, use the index
+                            last_rotation_name = f'Rotation {len(sorted_rotations)}'
+                        
+                        rotation_ranges.append({
+                            'name': last_rotation_name,
+                            'start_date': last_switch,
+                            'end_date': schedule_end
+                        })
+                
+                # Count call shifts by rotation for PGY2 and PGY3
+                call_by_rotation_data = []
+                residents_df = st.session_state.residents_df
+                for _, resident_row in residents_df.iterrows():
+                    resident_name = resident_row['Name']
+                    pgy_level = resident_row['PGY']
+                    if pgy_level in [2, 3]:  # Only PGY2 and PGY3
+                        for rotation in rotation_ranges:
+                            # Filter schedule for this rotation period
+                            rotation_mask = (
+                                (pd.to_datetime(df['Date']).dt.date >= rotation['start_date']) &
+                                (pd.to_datetime(df['Date']).dt.date <= rotation['end_date'])
+                            )
+                            rotation_schedule = df[rotation_mask]
+                            
+                            # Count call shifts (not backup) for this resident in this rotation
+                            call_shifts = rotation_schedule[rotation_schedule['Call'] == resident_name].shape[0]
+                            
+                            call_by_rotation_data.append({
+                                'Rotation': rotation['name'],
+                                'Resident': resident_name,
+                                'PGY_Level': f'PGY{pgy_level}',
+                                'Call_Shifts': call_shifts
+                            })
+                
+                if call_by_rotation_data:
+                    call_by_rotation_df = pd.DataFrame(call_by_rotation_data)
+                    
+                    # Display summary
+                    st.subheader("Call Shifts by Rotation")
+                    
+                    # Group by PGY level for display
+                    for pgy in [2, 3]:
+                        pgy_df = call_by_rotation_df[call_by_rotation_df['PGY_Level'] == f'PGY{pgy}']
+                        if not pgy_df.empty:
+                            st.write(f"**PGY{pgy}**")
+                            
+                            # Pivot for table display
+                            pivot_df = pgy_df.pivot(index='Resident', columns='Rotation', values='Call_Shifts').fillna(0)
+                            
+                            # Display as table
+                            st.dataframe(pivot_df, use_container_width=True)
+                            st.write("")  # Spacing
+                    
+                    # Overall summary table
+                    st.subheader("Summary Table")
+                    st.dataframe(call_by_rotation_df, use_container_width=True)
+                else:
+                    st.info("No call shift data found for PGY2/PGY3 residents.")
+        
+        with subtabs[6]:
             st.header("Download Schedule")
             if not st.session_state.schedule_df.empty:
                 # Prepare all data for the comprehensive Excel file
@@ -1801,17 +2130,50 @@ with tabs[9]:
                     schedule_start = pd.to_datetime(df_to_format['Date']).min().date()
                     schedule_end = pd.to_datetime(df_to_format['Date']).max().date()
                     
-                    # Create rotations from switch dates (last switch date is just end marker)
+                    # Rotation 0: from block start to first switch date
+                    if len(sorted_rotations) > 0:
+                        first_switch = sorted_rotations[0]['switch_date']
+                        if schedule_start < first_switch:
+                            rotation_ranges.append({
+                                'name': 'Rotation 0',
+                                'start_date': schedule_start,
+                                'end_date': first_switch - pd.Timedelta(days=1)
+                            })
+                    
+                    # Rotations 1, 2, 3...: between switch dates
                     for i in range(len(sorted_rotations) - 1):
                         rotation = sorted_rotations[i]
                         rotation_start = rotation['switch_date']
                         rotation_end = sorted_rotations[i + 1]['switch_date'] - pd.Timedelta(days=1)
                         
+                        # Use rotation name if provided, otherwise use index (i+1 since Rotation 0 is separate)
+                        rotation_name = rotation.get('rotation_name')
+                        if rotation_name:
+                            rotation_name = rotation_name
+                        else:
+                            rotation_name = f'Rotation {i + 1}'
+                        
                         rotation_ranges.append({
-                            'name': rotation.get('rotation_name', f'Rotation {i + 1}'),
+                            'name': rotation_name,
                             'start_date': rotation_start,
                             'end_date': rotation_end
                         })
+                    
+                    # Last rotation: from last switch date to block end
+                    if len(sorted_rotations) > 0:
+                        last_switch = sorted_rotations[-1]['switch_date']
+                        if last_switch <= schedule_end:
+                            # Get the rotation name for the last rotation
+                            last_rotation_name = sorted_rotations[-1].get('rotation_name')
+                            if not last_rotation_name:
+                                # If no name provided, use the index
+                                last_rotation_name = f'Rotation {len(sorted_rotations)}'
+                            
+                            rotation_ranges.append({
+                                'name': last_rotation_name,
+                                'start_date': last_switch,
+                                'end_date': schedule_end
+                            })
                     
                     # Count call shifts by rotation for PGY2 and PGY3
                     residents_df = st.session_state.residents_df
@@ -1875,7 +2237,12 @@ with tabs[9]:
                                 if priority == "Non-call request":
                                     if call_violation or backup_violation:
                                         violated_dates.append((d, call_violation, backup_violation))
+                                elif priority == "VA":
+                                    # VA: violation if assigned as call or backup (same as non-call request)
+                                    if call_violation or backup_violation:
+                                        violated_dates.append((d, call_violation, backup_violation))
                                 else:
+                                    # Rotation/Lecture: violation if assigned as call only
                                     if call_violation:
                                         violated_dates.append((d, True, False))
                                 d += pd.Timedelta(days=1)

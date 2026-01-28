@@ -141,6 +141,7 @@ def generate_ortools_schedule(residents, pgy_levels, start_date, end_date, holid
     call_fairness_weight = dev_settings.get('call_fairness_weight', 1.0)
     backup_fairness_weight = dev_settings.get('backup_fairness_weight', 0.3)
     non_call_request_weight = dev_settings.get('non_call_request_weight', 10.0)
+    va_weight = dev_settings.get('va_weight', 5.0)
     rotation_lecture_weight = dev_settings.get('rotation_lecture_weight', 0.1)
     golden_weekend_penalty = dev_settings.get('golden_weekend_weight', 0.01)
     rotation_fairness_weight = dev_settings.get('rotation_fairness_weight', 0.5)
@@ -587,14 +588,26 @@ def generate_ortools_schedule(residents, pgy_levels, start_date, end_date, holid
                         model.Add(backup[d] != r).OnlyEnforceIf(is_backup.Not())
                         violation = model.NewBoolVar(f'soft_violation_{resident}_{d}')
                         model.AddMaxEquality(violation, [is_call, is_backup])
-                        # Higher weight for non-call request
+                        # Highest weight for non-call request
                         soft_violation_vars.append((violation, non_call_request_weight))
+                    elif priority == "VA":
+                        # Violation if assigned as call or backup (same as non-call request)
+                        is_call = model.NewBoolVar(f'soft_call_va_{resident}_{d}')
+                        is_backup = model.NewBoolVar(f'soft_backup_va_{resident}_{d}')
+                        model.Add(call[d] == r).OnlyEnforceIf(is_call)
+                        model.Add(call[d] != r).OnlyEnforceIf(is_call.Not())
+                        model.Add(backup[d] == r).OnlyEnforceIf(is_backup)
+                        model.Add(backup[d] != r).OnlyEnforceIf(is_backup.Not())
+                        violation = model.NewBoolVar(f'soft_violation_va_{resident}_{d}')
+                        model.AddMaxEquality(violation, [is_call, is_backup])
+                        # Medium weight for VA (between non-call request and rotation/lecture)
+                        soft_violation_vars.append((violation, va_weight))
                     else:
-                        # Violation if assigned as call only
+                        # Violation if assigned as call only (Rotation/Lecture)
                         is_call = model.NewBoolVar(f'soft_call_{resident}_{d}')
                         model.Add(call[d] == r).OnlyEnforceIf(is_call)
                         model.Add(call[d] != r).OnlyEnforceIf(is_call.Not())
-                        # Lower weight for rotation/lecture
+                        # Lowest weight for rotation/lecture
                         soft_violation_vars.append((is_call, rotation_lecture_weight))
     # --- Rotation Fairness: Encourage at least 1 call and 1 backup per resident per rotation ---
     rotation_fairness_violations = []
@@ -674,6 +687,50 @@ def generate_ortools_schedule(residents, pgy_levels, start_date, end_date, holid
                         same_weekday_spacing_violations.append(spacing_violation)
     
     logging.info(f"Added {len(same_weekday_spacing_violations)} same-weekday spacing constraints (2-week window)")
+    
+    # --- Same-Week Constraint: Penalize multiple call assignments within the same calendar week ---
+    same_week_violations = []
+    
+    # Group dates by calendar week (ISO week: year-week)
+    week_groups = {}
+    for d, date in enumerate(dates):
+        # Use ISO week format (year, week_number)
+        iso_year, iso_week, _ = date.isocalendar()
+        week_key = (iso_year, iso_week)
+        if week_key not in week_groups:
+            week_groups[week_key] = []
+        week_groups[week_key].append(d)
+    
+    # For each resident, for each week, penalize pairs of call assignments within the same week
+    # This is similar to same-weekday spacing but applies to any two days in the same week
+    for r, resident in enumerate(residents):
+        for week_key, week_day_indices in week_groups.items():
+            if len(week_day_indices) < 2:
+                continue  # Skip weeks with less than 2 days (edge cases)
+            
+            # Check all pairs of days within this week
+            for i in range(len(week_day_indices) - 1):
+                d1 = week_day_indices[i]
+                for j in range(i + 1, len(week_day_indices)):
+                    d2 = week_day_indices[j]
+                    
+                    # Create violation if resident is on call on both days in the same week
+                    is_call_d1 = model.NewBoolVar(f'same_week_call_{resident}_{week_key[0]}_{week_key[1]}_{d1}')
+                    is_call_d2 = model.NewBoolVar(f'same_week_call_{resident}_{week_key[0]}_{week_key[1]}_{d2}')
+                    
+                    model.Add(call[d1] == r).OnlyEnforceIf(is_call_d1)
+                    model.Add(call[d1] != r).OnlyEnforceIf(is_call_d1.Not())
+                    model.Add(call[d2] == r).OnlyEnforceIf(is_call_d2)
+                    model.Add(call[d2] != r).OnlyEnforceIf(is_call_d2.Not())
+                    
+                    # Violation occurs if resident is on call on both days
+                    same_week_violation = model.NewBoolVar(f'same_week_violation_{resident}_{week_key[0]}_{week_key[1]}_{d1}_{d2}')
+                    model.AddBoolAnd([is_call_d1, is_call_d2]).OnlyEnforceIf(same_week_violation)
+                    model.AddBoolOr([is_call_d1.Not(), is_call_d2.Not()]).OnlyEnforceIf(same_week_violation.Not())
+                    same_week_violations.append(same_week_violation)
+    
+    logging.info(f"Added {len(same_week_violations)} same-week constraint violations (penalize multiple calls per week)")
+    
     # --- Golden Weekend Soft Constraint for PGY2s ---
     golden_weekends = {r: [] for r in pgy2_indices}  # r: list of (fri_date, is_golden)
     golden_weekend_vars = []
@@ -762,19 +819,20 @@ def generate_ortools_schedule(residents, pgy_levels, start_date, end_date, holid
         
         logging.info(f"Added {len(golden_rotation_violations)} golden weekend 4-week fallback constraints")
 
-    # Objective: minimize sum of all spreads, soft constraint violations, rotation fairness, same-weekday spacing, golden weekend penalties, and add soft preference for PGY4s on Thursdays and PGY2s on Wednesdays
+    # Objective: minimize sum of all spreads, soft constraint violations, rotation fairness, same-weekday spacing, same-week violations, golden weekend penalties, and add soft preference for PGY4s on Thursdays and PGY2s on Wednesdays
     soft_obj = sum(weight * var for var, weight in soft_violation_vars) if soft_violation_vars else model.NewConstant(0)
     rotation_fairness_obj = rotation_fairness_weight * sum(rotation_fairness_violations) if rotation_fairness_violations else 0
     same_weekday_spacing_obj = same_weekday_spacing_weight * sum(same_weekday_spacing_violations) if same_weekday_spacing_violations else 0
+    same_week_obj = same_weekday_spacing_weight * sum(same_week_violations) if same_week_violations else 0  # Use same weight as same-weekday spacing
     golden_obj = golden_weekend_penalty * sum(golden_weekend_vars) if golden_weekend_vars else 0
     golden_rotation_obj = 5.0 * sum(golden_rotation_violations) if golden_rotation_violations else 0  # Higher weight for rotation constraint
     
-    if fairness_vars or thursday_pgy4_bonus_vars or soft_violation_vars or rotation_fairness_violations or same_weekday_spacing_violations or golden_weekend_vars or wednesday_pgy2_bonus_vars or golden_rotation_violations:
+    if fairness_vars or thursday_pgy4_bonus_vars or soft_violation_vars or rotation_fairness_violations or same_weekday_spacing_violations or same_week_violations or golden_weekend_vars or wednesday_pgy2_bonus_vars or golden_rotation_violations:
         model.Minimize(
             sum(fairness_vars)
             - pgy4_thursday_bonus * sum(thursday_pgy4_bonus_vars)
             - pgy2_wednesday_bonus * sum(wednesday_pgy2_bonus_vars)
-            + soft_obj + rotation_fairness_obj + same_weekday_spacing_obj + golden_obj + golden_rotation_obj
+            + soft_obj + rotation_fairness_obj + same_weekday_spacing_obj + same_week_obj + golden_obj + golden_rotation_obj
         )
 
     # Constraint: backup PGY level must match call PGY level for each day (except holidays)
@@ -907,7 +965,7 @@ def optimize_intern_assignments(schedule_df, residents, pgy_levels, hard_constra
     
     # OPTIMIZED: Build constraint lookups more efficiently
     hard_lookup = defaultdict(set)
-    soft_violations_lookup = defaultdict(set)  # Only track "Non-call request" soft constraints
+    soft_violations_lookup = defaultdict(set)  # Only track "Non-call request" and "VA" soft constraints (high/medium priority)
     
     for name in intern_names:
         # Hard constraints - same as before but more efficient
@@ -920,7 +978,7 @@ def optimize_intern_assignments(schedule_df, residents, pgy_levels, hard_constra
                 hard_lookup[name].add(current)
                 current += pd.Timedelta(days=1).to_pytimedelta()
         
-        # Soft constraints - only track "Non-call request" (high priority)
+        # Soft constraints - only track "Non-call request" and "VA" (high/medium priority)
         for sc in soft_constraints.get(name, []):
             if len(sc) == 2:
                 start, end = sc
@@ -928,8 +986,8 @@ def optimize_intern_assignments(schedule_df, residents, pgy_levels, hard_constra
             else:
                 start, end, priority = sc
             
-            # Only process high-priority soft constraints
-            if priority == "Non-call request":
+            # Only process high/medium-priority soft constraints (Non-call request and VA)
+            if priority in ["Non-call request", "VA"]:
                 current = start if hasattr(start, 'date') else pd.to_datetime(start).date()
                 end_date = end if hasattr(end, 'date') else pd.to_datetime(end).date()
                 while current <= end_date:
@@ -1039,74 +1097,182 @@ def optimize_intern_assignments(schedule_df, residents, pgy_levels, hard_constra
                 if date in soft_violations_lookup[intern_name]:
                     soft_violations.append(intern_assigned[d_idx][i])
     
-    logging.info(f"Tracking {len(soft_violations)} high-priority soft constraint violations")
+    logging.info(f"Tracking {len(soft_violations)} high/medium-priority soft constraint violations (Non-call request and VA)")
     
-    # Intern cap constraint: Maximum assignments per intern per 4-week period
+    # --- Intern-Senior Variety Factor: Track (intern, senior) pairings ---
+    # Build mapping of intern days to their senior (PGY3/4 on call)
+    intern_day_to_senior = {}
+    senior_names = set()
+    for d_idx, day_idx in enumerate(intern_days):
+        call_resident = schedule_df.iloc[day_idx]['Call']
+        call_pgy = pgy_levels[residents.index(call_resident)] if call_resident in residents else None
+        if call_pgy in [3, 4]:  # Only PGY3/4 can have interns
+            intern_day_to_senior[d_idx] = call_resident
+            senior_names.add(call_resident)
+    
+    senior_names = sorted(list(senior_names))  # Convert to sorted list for consistency
+    n_seniors = len(senior_names)
+    
+    # Create count variables for each (intern, senior) pair
+    intern_senior_counts = {}  # (i, s_idx) -> count variable
+    if n_seniors > 0:
+        for i in range(n_interns):
+            for s_idx, senior_name in enumerate(senior_names):
+                # Count how many times intern i is assigned when senior s is on call
+                count_vars = []
+                for d_idx, day_idx in enumerate(intern_days):
+                    if d_idx in intern_day_to_senior and intern_day_to_senior[d_idx] == senior_name:
+                        assignment_var = intern_assigned[d_idx].get(i)
+                        if isinstance(assignment_var, cp_model.IntVar):
+                            count_vars.append(assignment_var)
+                
+                if count_vars:
+                    count_var = model.NewIntVar(0, n_intern_days, f'intern_{i}_senior_{s_idx}_count')
+                    model.Add(count_var == sum(count_vars))
+                    intern_senior_counts[(i, s_idx)] = count_var
+        
+        # Minimax: minimize the maximum (intern, senior) pairing count
+        if intern_senior_counts:
+            max_pairing = model.NewIntVar(0, n_intern_days, 'max_intern_senior_pairing')
+            for (i, s_idx), count_var in intern_senior_counts.items():
+                model.Add(max_pairing >= count_var)
+            variety_obj = max_pairing
+            logging.info(f"Added variety factor tracking {len(intern_senior_counts)} (intern, senior) pairs across {n_seniors} seniors")
+        else:
+            variety_obj = 0
+            logging.info("No (intern, senior) pairs to track for variety")
+    else:
+        variety_obj = 0
+        logging.info("No seniors found for variety tracking")
+    
+    # Intern cap constraint: Maximum assignments per intern per rotation period (or 4-week period if no rotations)
     if intern_cap is not None and intern_cap > 0:
         cap_constraints = 0
+        
+        if rotation_ranges:
+            # Use rotation periods
+            for i, intern_name in enumerate(intern_names):
+                for rotation in rotation_ranges:
+                    rotation_start = rotation['start_date']
+                    rotation_end = rotation['end_date']
+                    
+                    # Find all intern days within this rotation period
+                    rotation_assignments = []
+                    for d_idx, day_idx in enumerate(intern_days):
+                        check_date = pd.to_datetime(schedule_df.iloc[day_idx]['Date']).date()
+                        
+                        if rotation_start <= check_date <= rotation_end:
+                            assignment_var = intern_assigned[d_idx].get(i)
+                            if isinstance(assignment_var, cp_model.IntVar):
+                                rotation_assignments.append(assignment_var)
+                    
+                    # Apply cap constraint to this rotation period
+                    if len(rotation_assignments) > intern_cap:
+                        model.Add(sum(rotation_assignments) <= intern_cap)
+                        cap_constraints += 1
+            
+            logging.info(f"Applied intern cap of {intern_cap} assignments per rotation period, created {cap_constraints} rotation constraints")
+        else:
+            # Fallback to 4-week rolling windows
+            window_size_days = 28  # 4 weeks = 28 days
+            
+            for i, intern_name in enumerate(intern_names):
+                # For each possible 4-week window, ensure intern doesn't exceed cap
+                for start_idx in range(n_intern_days):
+                    # Define the 4-week window starting from this day
+                    start_day_idx = intern_days[start_idx]
+                    start_date = pd.to_datetime(schedule_df.iloc[start_day_idx]['Date']).date()
+                    end_date = start_date + pd.Timedelta(days=window_size_days - 1).to_pytimedelta()
+                    
+                    # Find all intern days within this 4-week window
+                    window_assignments = []
+                    for check_idx in range(start_idx, n_intern_days):
+                        check_day_idx = intern_days[check_idx]
+                        check_date = pd.to_datetime(schedule_df.iloc[check_day_idx]['Date']).date()
+                        
+                        if start_date <= check_date <= end_date:
+                            if isinstance(intern_assigned[check_idx][i], cp_model.IntVar):
+                                window_assignments.append(intern_assigned[check_idx][i])
+                        elif check_date > end_date:
+                            break  # Days are sorted, so we can break early
+                    
+                    # Apply cap constraint to this 4-week window
+                    if len(window_assignments) > intern_cap:
+                        model.Add(sum(window_assignments) <= intern_cap)
+                        cap_constraints += 1
+            
+            logging.info(f"Applied intern cap of {intern_cap} assignments per 4-week period (no rotations), created {cap_constraints} window constraints")
+    else:
+        logging.info("No intern cap specified - unlimited assignments per intern")
+    
+    # Saturday cap constraint: Maximum 2 Saturday assignments per intern per rotation period (or 4-week period if no rotations)
+    saturday_cap_constraints = 0
+    
+    if rotation_ranges:
+        # Use rotation periods
+        for i, intern_name in enumerate(intern_names):
+            for rotation in rotation_ranges:
+                rotation_start = rotation['start_date']
+                rotation_end = rotation['end_date']
+                
+                # Find all Saturday intern days within this rotation period
+                saturday_assignments = []
+                for d_idx, day_idx in enumerate(intern_days):
+                    check_date = pd.to_datetime(schedule_df.iloc[day_idx]['Date']).date()
+                    
+                    if rotation_start <= check_date <= rotation_end:
+                        # Check if this is a Saturday
+                        if check_date.weekday() == 5:  # Saturday
+                            assignment_var = intern_assigned[d_idx].get(i)
+                            if isinstance(assignment_var, cp_model.IntVar):
+                                saturday_assignments.append(assignment_var)
+                
+                # Apply Saturday cap constraint to this rotation period (max 2 Saturdays)
+                if len(saturday_assignments) > 2:
+                    model.Add(sum(saturday_assignments) <= 2)
+                    saturday_cap_constraints += 1
+        
+        logging.info(f"Applied Saturday cap of 2 per rotation period, created {saturday_cap_constraints} rotation constraints")
+    else:
+        # Fallback to 4-week rolling windows
         window_size_days = 28  # 4 weeks = 28 days
         
         for i, intern_name in enumerate(intern_names):
-            # For each possible 4-week window, ensure intern doesn't exceed cap
+            # For each possible 4-week window, ensure intern doesn't exceed 2 Saturday assignments
             for start_idx in range(n_intern_days):
                 # Define the 4-week window starting from this day
                 start_day_idx = intern_days[start_idx]
                 start_date = pd.to_datetime(schedule_df.iloc[start_day_idx]['Date']).date()
                 end_date = start_date + pd.Timedelta(days=window_size_days - 1).to_pytimedelta()
                 
-                # Find all intern days within this 4-week window
-                window_assignments = []
+                # Find all Saturday intern days within this 4-week window
+                saturday_assignments = []
                 for check_idx in range(start_idx, n_intern_days):
                     check_day_idx = intern_days[check_idx]
                     check_date = pd.to_datetime(schedule_df.iloc[check_day_idx]['Date']).date()
                     
                     if start_date <= check_date <= end_date:
-                        if isinstance(intern_assigned[check_idx][i], cp_model.IntVar):
-                            window_assignments.append(intern_assigned[check_idx][i])
+                        # Check if this is a Saturday
+                        if check_date.weekday() == 5:  # Saturday
+                            if isinstance(intern_assigned[check_idx][i], cp_model.IntVar):
+                                saturday_assignments.append(intern_assigned[check_idx][i])
                     elif check_date > end_date:
                         break  # Days are sorted, so we can break early
                 
-                # Apply cap constraint to this 4-week window
-                if len(window_assignments) > intern_cap:
-                    model.Add(sum(window_assignments) <= intern_cap)
-                    cap_constraints += 1
+                # Apply Saturday cap constraint to this 4-week window (max 2 Saturdays)
+                if len(saturday_assignments) > 2:
+                    model.Add(sum(saturday_assignments) <= 2)
+                    saturday_cap_constraints += 1
         
-        logging.info(f"Applied intern cap of {intern_cap} assignments per 4-week period, created {cap_constraints} window constraints")
-    else:
-        logging.info("No intern cap specified - unlimited assignments per intern")
+        logging.info(f"Applied Saturday cap of 2 per 4-week period (no rotations), created {saturday_cap_constraints} window constraints")
     
-    # Saturday cap constraint: Maximum 2 Saturday assignments per intern per 4-week period
-    saturday_cap_constraints = 0
-    window_size_days = 28  # 4 weeks = 28 days
-    
-    for i, intern_name in enumerate(intern_names):
-        # For each possible 4-week window, ensure intern doesn't exceed 2 Saturday assignments
-        for start_idx in range(n_intern_days):
-            # Define the 4-week window starting from this day
-            start_day_idx = intern_days[start_idx]
-            start_date = pd.to_datetime(schedule_df.iloc[start_day_idx]['Date']).date()
-            end_date = start_date + pd.Timedelta(days=window_size_days - 1).to_pytimedelta()
-            
-            # Find all Saturday intern days within this 4-week window
-            saturday_assignments = []
-            for check_idx in range(start_idx, n_intern_days):
-                check_day_idx = intern_days[check_idx]
-                check_date = pd.to_datetime(schedule_df.iloc[check_day_idx]['Date']).date()
-                
-                if start_date <= check_date <= end_date:
-                    # Check if this is a Saturday
-                    if check_date.weekday() == 5:  # Saturday
-                        if isinstance(intern_assigned[check_idx][i], cp_model.IntVar):
-                            saturday_assignments.append(intern_assigned[check_idx][i])
-                elif check_date > end_date:
-                    break  # Days are sorted, so we can break early
-            
-            # Apply Saturday cap constraint to this 4-week window (max 2 Saturdays)
-            if len(saturday_assignments) > 2:
-                model.Add(sum(saturday_assignments) <= 2)
-                saturday_cap_constraints += 1
-    
-    logging.info(f"Applied Saturday cap of 2 per 4-week period, created {saturday_cap_constraints} window constraints")
+    # Get weights from dev_settings (with defaults)
+    intern_total_fairness_weight = dev_settings.get('intern_total_fairness_weight', 5.0)
+    intern_weekday_fairness_weight = dev_settings.get('intern_weekday_fairness_weight', 3.0)
+    intern_saturday_fairness_weight = dev_settings.get('intern_saturday_fairness_weight', 3.0)
+    intern_soft_constraint_weight = dev_settings.get('intern_soft_constraint_weight', 20.0)
+    intern_consecutive_penalty_weight = dev_settings.get('intern_consecutive_penalty_weight', 2.0)
+    intern_senior_variety_weight = dev_settings.get('intern_senior_variety_weight', 2.0)
     
     # Fairness optimization with day-type specificity
     soft_obj = sum(soft_violations) if soft_violations else 0
@@ -1141,19 +1307,37 @@ def optimize_intern_assignments(schedule_df, residents, pgy_levels, hard_constra
     else:
         saturday_fairness_obj = 0
 
-    # Balanced objective function with day-type fairness
+    # Balanced objective function with day-type fairness and variety
     consecutive_penalty_obj = sum(consecutive_soft_penalties) if consecutive_soft_penalties else 0
     
-    if any([total_fairness_obj != 0, weekday_fairness_obj != 0, saturday_fairness_obj != 0, soft_obj != 0, consecutive_penalty_obj != 0]):
-        model.Minimize(
-            5 * total_fairness_obj +     # Total fairness
-            3 * weekday_fairness_obj +   # Weekday fairness
-            3 * saturday_fairness_obj +  # Saturday fairness  
-            20 * soft_obj +              # High-priority soft constraints
-            2 * consecutive_penalty_obj  # Consecutive assignment penalty (moderate weight)
-        )
+    # Build objective terms
+    # Note: CP-SAT expressions can't be compared to 0, so we check list lengths or weights instead
+    objective_terms = []
+    if len(intern_total_counts) > 1 and intern_total_fairness_weight > 0:
+        objective_terms.append(intern_total_fairness_weight * total_fairness_obj)
+    if len(intern_weekday_counts) > 1 and intern_weekday_fairness_weight > 0:
+        objective_terms.append(intern_weekday_fairness_weight * weekday_fairness_obj)
+    if len(intern_saturday_counts) > 1 and intern_saturday_fairness_weight > 0:
+        objective_terms.append(intern_saturday_fairness_weight * saturday_fairness_obj)
+    if soft_violations and intern_soft_constraint_weight > 0:
+        objective_terms.append(intern_soft_constraint_weight * soft_obj)
+    if consecutive_soft_penalties and intern_consecutive_penalty_weight > 0:
+        objective_terms.append(intern_consecutive_penalty_weight * consecutive_penalty_obj)
+    if intern_senior_variety_weight > 0:
+        # variety_obj is either a CP-SAT IntVar (when tracking pairs) or integer 0 (when no pairs)
+        if isinstance(variety_obj, int):
+            # If it's an integer, only add if non-zero
+            if variety_obj != 0:
+                objective_terms.append(intern_senior_variety_weight * variety_obj)
+        else:
+            # If it's a CP-SAT variable, always add it (it represents max_pairing)
+            objective_terms.append(intern_senior_variety_weight * variety_obj)
     
-    logging.info(f"Objective: 5*total + 3*weekday + 3*saturday + 20*soft_violations + 2*consecutive_penalties")
+    if objective_terms:
+        model.Minimize(sum(objective_terms))
+        logging.info(f"Objective: {intern_total_fairness_weight}*total + {intern_weekday_fairness_weight}*weekday + {intern_saturday_fairness_weight}*saturday + {intern_soft_constraint_weight}*soft_violations + {intern_consecutive_penalty_weight}*consecutive_penalties + {intern_senior_variety_weight}*variety")
+    else:
+        logging.warning("No objective terms - all weights may be zero or no constraints")
     
     # Solve
     solver = cp_model.CpSolver()
@@ -1242,7 +1426,7 @@ def assign_supervisors(schedule_df, residents, pgy_levels, hard_constraints, sof
             days = pd.date_range(start, end)
             for d in days:
                 hard_lookup[name].add(pd.to_datetime(d).date())
-    # Build soft constraint lookup (only Non-call request)
+    # Build soft constraint lookup (only Non-call request and VA)
     soft_lookup = defaultdict(set)
     for name in supervisor_names:
         for sc in soft_constraints.get(name, []):
@@ -1251,7 +1435,7 @@ def assign_supervisors(schedule_df, residents, pgy_levels, hard_constraints, sof
                 priority = "Rotation/Lecture"
             else:
                 start, end, priority = sc
-            if priority != "Non-call request":
+            if priority not in ["Non-call request", "VA"]:
                 continue
             days = pd.date_range(start, end)
             for d in days:

@@ -225,7 +225,13 @@ def format_schedule(schedule_df, call_distribution_df=None, golden_weekends_data
     end = schedule_df['Date'].max()
     if pd.isna(start) or pd.isna(end):
         raise ValueError("Cannot generate calendar: schedule has no valid dates.")
-    months = pd.date_range(start, end, freq='MS')
+    
+    # Get the first day of the month containing the start date
+    start_month_start = datetime(start.year, start.month, 1)
+    # Get the first day of the month containing the end date
+    end_month_start = datetime(end.year, end.month, 1)
+    # Generate all month starts from start month to end month (inclusive)
+    months = pd.date_range(start_month_start, end_month_start, freq='MS')
     
     # Create calendar sheets first (visual formatting)
     for month in months:
